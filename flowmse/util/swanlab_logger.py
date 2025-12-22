@@ -114,11 +114,12 @@ class SwanLabLogger(LightningLoggerBase):
             _ = self.experiment
             return
 
-        # Otherwise, best-effort log as a single step
-        try:
-            self._swanlab.log({f"hparams/{k}": v for k, v in params_dict.items()})
-        except Exception:
-            pass
+        # Otherwise, best-effort log as a single step (只记录数值类型)
+        if numeric_params:
+            try:
+                self._swanlab.log({f"hparams/{k}": v for k, v in numeric_params.items()})
+            except Exception:
+                pass
 
     @rank_zero_only
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
