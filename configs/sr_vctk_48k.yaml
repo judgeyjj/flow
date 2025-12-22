@@ -23,7 +23,7 @@ swanlab_description: "48k SR on VCTK (8/16/24/32k -> 48k)"
 
 VFModel:
   # SR validation metrics (sampling-based)
-  num_eval_files: 4
+  num_eval_files: 50
   sr_eval_steps: 5
 
 DataModule:
