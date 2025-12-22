@@ -30,8 +30,8 @@ VFModel:
   sr_eval_steps: 5
 
   # Optional GAN fine-tuning (helps perceptual HF detail; recommend enabling only after a stable pretrain)
-  gan_enabled: false
-  gan_warmup_epochs: 0
+  gan_enabled: true
+  gan_warmup_epochs: 0  # 改这个值来设置 GAN 开始的 epoch
   gan_disc_lr: 0.0002
   gan_disc_beta1: 0.8
   gan_disc_beta2: 0.99
