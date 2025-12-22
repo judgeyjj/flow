@@ -158,8 +158,8 @@ class SpecsDataModule(pl.LightningDataModule):
     @staticmethod
     def add_argparse_args(parser):
         # Dataset dirs (recursive wav search)
-        parser.add_argument("--train_dir", type=str, required=True, help="Training folder path (recursively search *.wav).")
-        parser.add_argument("--valid_dir", type=str, required=True, help="Validation folder path (recursively search *.wav).")
+        parser.add_argument("--train_dir", type=str, default=None, help="Training folder path (recursively search *.wav).")
+        parser.add_argument("--valid_dir", type=str, default=None, help="Validation folder path (recursively search *.wav).")
         parser.add_argument("--test_dir", type=str, default=None, help="Optional test folder path (recursively search *.wav).")
 
         # SR settings
