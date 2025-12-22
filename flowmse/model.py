@@ -384,37 +384,22 @@ class VFModel(pl.LightningModule):
                 # 保存验证音频样本 (每个采样率各保存一个)
                 try:
                     import soundfile as sf
-                    import os
-                    audio_save_dir = os.path.join(self.trainer.log_dir or "logs", "val_audio")
+                    # 使用固定路径，避免访问可能阻塞的 trainer.log_dir
+                    audio_save_dir = "logs/val_audio"
                     os.makedirs(audio_save_dir, exist_ok=True)
                     epoch = self.current_epoch
-                    
-                    # 每个采样率保存一个样本
                     saved_rates = set()
                     sr_np = sr_out.detach().cpu().numpy().astype(int) if sr_out is not None else np.zeros(n, dtype=int)
                     for i in range(n):
                         sr_tag = int(sr_np[i])
                         if sr_tag in saved_rates:
-                            continue  # 该采样率已保存过
+                            continue
                         saved_rates.add(sr_tag)
-                        
-                        # 保存 GT (高分辨率目标)
-                        sf.write(
-                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_gt.wav"),
-                            x_wav[i], sr_hr
-                        )
-                        # 保存 LR/Cond (低分辨率条件输入)
-                        sf.write(
-                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_lr.wav"),
-                            y_wav[i], sr_hr
-                        )
-                        # 保存 SR (模型生成的超分辨率结果)
-                        sf.write(
-                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_sr.wav"),
-                            xhat_wav[i], sr_hr
-                        )
+                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_gt.wav"), x_wav[i], sr_hr)
+                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_lr.wav"), y_wav[i], sr_hr)
+                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_sr.wav"), xhat_wav[i], sr_hr)
                 except Exception as e:
-                    warnings.warn(f"保存验证音频失败: {e}")
+                    pass  # 静默失败，不影响训练
 
         return loss
 
