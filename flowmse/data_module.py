@@ -21,8 +21,19 @@ import pytorch_lightning as pl
 from scipy.signal import resample as scipy_resample
 import torch
 import torch.nn.functional as F
-from torchaudio import load
+import soundfile as sf  # 使用 soundfile 替代 torchaudio，避免 torchcodec 兼容性问题
 from torch.utils.data import Dataset, DataLoader
+
+
+def load_audio(filepath):
+    """使用 soundfile 加载音频文件，返回 (waveform, sample_rate)"""
+    data, sr = sf.read(filepath, dtype='float32')
+    # soundfile 返回 (samples, channels)，转换为 (channels, samples)
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    else:
+        data = data.T
+    return torch.from_numpy(data), sr
 
 
 def get_window(window_type: str, window_length: int) -> torch.Tensor:
@@ -107,7 +118,7 @@ class Specs(Dataset):
         return len(self.wav_files)
 
     def __getitem__(self, i):
-        x, sr_x = load(self.wav_files[i])
+        x, sr_x = load_audio(self.wav_files[i])
 
         # mono
         if x.dim() == 2 and x.size(0) > 1:
