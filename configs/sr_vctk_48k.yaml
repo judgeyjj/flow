@@ -16,10 +16,10 @@ no_wandb: true
 
 # Logger (optional)
 # - choices: wandb / tensorboard / swanlab
-# logger: swanlab
-# swanlab_project: FlowMSE-SR
-# swanlab_experiment_name: sr_vctk_48k
-# swanlab_description: "48k SR on VCTK (8/16/24/32k -> 48k)"
+logger: swanlab
+swanlab_project: FlowMSE-SR
+swanlab_experiment_name: sr_vctk_48k
+swanlab_description: "48k SR on VCTK (8/16/24/32k -> 48k)"
 
 VFModel:
   # SR validation metrics (sampling-based)

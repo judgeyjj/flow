@@ -189,7 +189,7 @@ class VFModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         loss = self._step(batch, batch_idx)
-        self.log('valid_loss', loss, on_step=False, on_epoch=True)
+        self.log('valid_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
 
         # SR validation metrics (requires sampling; computed on a small subset)
         # Only run heavy sampling metrics on global rank 0 under DDP.
@@ -270,11 +270,11 @@ class VFModel(pl.LightningModule):
                 sc_cond = sc_cond_b.mean()
                 sc_gen = sc_gen_b.mean()
 
-                self.log("val_lsd_cond", lsd_cond, on_step=False, on_epoch=True)
-                self.log("val_lsd_gen", lsd_gen, on_step=False, on_epoch=True)
-                self.log("val_sc_cond", sc_cond, on_step=False, on_epoch=True)
-                self.log("val_sc_gen", sc_gen, on_step=False, on_epoch=True)
-                self.log("val_lsd_gain", lsd_cond - lsd_gen, on_step=False, on_epoch=True)
+                self.log("val_lsd_cond", lsd_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_lsd_gen", lsd_gen, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_sc_cond", sc_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_sc_gen", sc_gen, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_lsd_gain", lsd_cond - lsd_gen, on_step=False, on_epoch=True, sync_dist=True)
 
                 # Bucketed logging by dynamic sr_out (only for the sampled subset)
                 if sr_out is not None:
@@ -285,12 +285,12 @@ class VFModel(pl.LightningModule):
                     for rate in bucket_rates:
                         mask = (sr_out == int(rate))
                         if bool(mask.any()):
-                            self.log(f"val_n_sr{int(rate)}", mask.sum(), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_cond_sr{int(rate)}", lsd_cond_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_gen_sr{int(rate)}", lsd_gen_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_sc_cond_sr{int(rate)}", sc_cond_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_sc_gen_sr{int(rate)}", sc_gen_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_gain_sr{int(rate)}", (lsd_cond_b[mask].mean() - lsd_gen_b[mask].mean()), on_step=False, on_epoch=True)
+                            self.log(f"val_n_sr{int(rate)}", mask.sum(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_lsd_cond_sr{int(rate)}", lsd_cond_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_lsd_gen_sr{int(rate)}", lsd_gen_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_sc_cond_sr{int(rate)}", sc_cond_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_sc_gen_sr{int(rate)}", sc_gen_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_lsd_gain_sr{int(rate)}", (lsd_cond_b[mask].mean() - lsd_gen_b[mask].mean()), on_step=False, on_epoch=True, sync_dist=True)
 
                 # Time-domain metrics (not part of loss): PESQ/ESTOI are computed on 16kHz downsampled audio.
                 target_len = int((self.data_module.num_frames - 1) * self.data_module.hop_length)
@@ -353,15 +353,15 @@ class VFModel(pl.LightningModule):
                 sisdr_cond = _nanmean(sisdr_cond_list)
                 sisdr_gen = _nanmean(sisdr_gen_list)
 
-                self.log("val_pesq_cond_16k", pesq_cond, on_step=False, on_epoch=True)
-                self.log("val_pesq_gen_16k", pesq_gen, on_step=False, on_epoch=True)
-                self.log("val_pesq_gain_16k", pesq_gen - pesq_cond, on_step=False, on_epoch=True)
-                self.log("val_estoi_cond_16k", estoi_cond, on_step=False, on_epoch=True)
-                self.log("val_estoi_gen_16k", estoi_gen, on_step=False, on_epoch=True)
-                self.log("val_estoi_gain_16k", estoi_gen - estoi_cond, on_step=False, on_epoch=True)
-                self.log("val_si_sdr_cond", sisdr_cond, on_step=False, on_epoch=True)
-                self.log("val_si_sdr_gen", sisdr_gen, on_step=False, on_epoch=True)
-                self.log("val_si_sdr_gain", sisdr_gen - sisdr_cond, on_step=False, on_epoch=True)
+                self.log("val_pesq_cond_16k", pesq_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_pesq_gen_16k", pesq_gen, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_pesq_gain_16k", pesq_gen - pesq_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_estoi_cond_16k", estoi_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_estoi_gen_16k", estoi_gen, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_estoi_gain_16k", estoi_gen - estoi_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_si_sdr_cond", sisdr_cond, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_si_sdr_gen", sisdr_gen, on_step=False, on_epoch=True, sync_dist=True)
+                self.log("val_si_sdr_gain", sisdr_gen - sisdr_cond, on_step=False, on_epoch=True, sync_dist=True)
 
                 # Bucketed time-domain metrics (same subset)
                 if sr_out is not None:
@@ -374,12 +374,12 @@ class VFModel(pl.LightningModule):
                         idx = np.where(sr_np == int(rate))[0]
                         if idx.size == 0:
                             continue
-                        self.log(f"val_pesq_cond_16k_sr{int(rate)}", _nanmean([pesq_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_pesq_gen_16k_sr{int(rate)}", _nanmean([pesq_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_estoi_cond_16k_sr{int(rate)}", _nanmean([estoi_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_estoi_gen_16k_sr{int(rate)}", _nanmean([estoi_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_si_sdr_cond_sr{int(rate)}", _nanmean([sisdr_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_si_sdr_gen_sr{int(rate)}", _nanmean([sisdr_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
+                        self.log(f"val_pesq_cond_16k_sr{int(rate)}", _nanmean([pesq_cond_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
+                        self.log(f"val_pesq_gen_16k_sr{int(rate)}", _nanmean([pesq_gen_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
+                        self.log(f"val_estoi_cond_16k_sr{int(rate)}", _nanmean([estoi_cond_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
+                        self.log(f"val_estoi_gen_16k_sr{int(rate)}", _nanmean([estoi_gen_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
+                        self.log(f"val_si_sdr_cond_sr{int(rate)}", _nanmean([sisdr_cond_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
+                        self.log(f"val_si_sdr_gen_sr{int(rate)}", _nanmean([sisdr_gen_list[i] for i in idx]), on_step=False, on_epoch=True, sync_dist=True)
 
         return loss
 
