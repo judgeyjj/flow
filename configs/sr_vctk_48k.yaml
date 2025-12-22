@@ -1,0 +1,59 @@
+# Speech Super-Resolution (SR) config for FlowMSE (folder-based, 48kHz target)
+#
+# Usage:
+#   python train.py --config configs/sr_vctk_48k.yaml
+#
+# Notes:
+# - You can override any field via CLI flags.
+# - If you want to select a specific GPU, prefer:
+#     CUDA_VISIBLE_DEVICES=0 python train.py --config ...
+#
+
+# Base options
+backbone: dcunet
+ode: flowmatching
+no_wandb: true
+
+# Logger (optional)
+# - choices: wandb / tensorboard / swanlab
+# logger: swanlab
+# swanlab_project: FlowMSE-SR
+# swanlab_experiment_name: sr_vctk_48k
+# swanlab_description: "48k SR on VCTK (8/16/24/32k -> 48k)"
+
+VFModel:
+  # SR validation metrics (sampling-based)
+  num_eval_files: 4
+  sr_eval_steps: 5
+
+DataModule:
+  sampling_rate: 48000
+  supported_sampling_rates: [8000, 16000, 24000, 32000]  # will be randomly chosen per sample (always resample)
+
+  # Point these to your VCTK split folders; wav files can be nested in subfolders.
+  train_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/clean
+  valid_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/eval
+  # test_dir: /abs/path/to/vctk/test
+
+  # STFT / batching
+  # For DCUNet, make sure (n_fft/2) is divisible by the total frequency stride product.
+  n_fft: 2048
+  hop_length: 512
+  num_frames: 256
+  batch_size: 8
+  num_workers: 4
+
+  # Normalization
+  normalize: cond
+  transform_type: exponent
+  spec_factor: 0.15
+  spec_abs_exponent: 0.5
+
+Trainer:
+  # Keep this minimal; PL arg names map 1:1 (e.g. max_epochs, gpus, precision, log_every_n_steps).
+  max_epochs: 200
+  gpus: 2   # set >1 to enable DDP acceleration (single-node multi-GPU)
+  # num_nodes: 1  # set >1 for multi-node
+  # precision: 16
+  # accumulate_grad_batches: 1
+
