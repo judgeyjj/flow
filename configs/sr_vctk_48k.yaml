@@ -14,6 +14,9 @@ backbone: dcunet
 ode: flowmatching
 no_wandb: true
 
+# Optional: resume / fine-tune from a Lightning checkpoint
+# ckpt_path: /abs/path/to/your.ckpt
+
 # Logger (optional)
 # - choices: wandb / tensorboard / swanlab
 logger: swanlab
@@ -25,6 +28,22 @@ VFModel:
   # SR validation metrics (sampling-based)
   num_eval_files: 50
   sr_eval_steps: 5
+
+  # Optional GAN fine-tuning (helps perceptual HF detail; recommend enabling only after a stable pretrain)
+  gan_enabled: false
+  gan_warmup_epochs: 0
+  gan_disc_lr: 0.0002
+  gan_disc_beta1: 0.8
+  gan_disc_beta2: 0.99
+  gan_lambda_adv: 1.0
+  gan_lambda_fm: 2.0
+  gan_lambda_mel: 45.0
+  gan_lambda_wav: 0.0
+  gan_mbd_fft_sizes: [2048, 1024, 512]
+  gan_mel_n_mels: 80
+  gan_mel_fmin: 0.0
+  gan_mel_fmax: -1.0   # -1 => sr/2
+  gan_use_mbd: true
 
 DataModule:
   sampling_rate: 48000

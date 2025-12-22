@@ -116,6 +116,12 @@ if __name__ == '__main__':
     for parser_ in (base_parser, parser):
         parser_.add_argument("--config", type=str, default=None, 
                             help="Path to a YAML/JSON config file. Values become argparse defaults; CLI overrides config.")
+        parser_.add_argument(
+            "--ckpt_path",
+            type=str,
+            default=None,
+            help="Optional Lightning .ckpt path to resume / fine-tune from (passed to trainer.fit(ckpt_path=...)).",
+        )
         parser_.add_argument("--backbone", type=str, choices=BackboneRegistry.get_all_names(), default="ncsnpp")
         parser_.add_argument("--ode", type=str, choices=ODERegistry.get_all_names(), default="flowmatching")    
         parser_.add_argument("--no_wandb", action='store_true', 
@@ -267,4 +273,11 @@ if __name__ == '__main__':
         )
 
     # 开始训练
-    trainer.fit(model)
+    fit_kwargs = {}
+    if getattr(args, "ckpt_path", None):
+        fit_kwargs["ckpt_path"] = args.ckpt_path
+    try:
+        trainer.fit(model, **fit_kwargs)
+    except TypeError:
+        # Older PL versions may not support ckpt_path in fit(); fall back.
+        trainer.fit(model)

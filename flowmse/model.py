@@ -60,11 +60,52 @@ class VFModel(pl.LightningModule):
         parser.add_argument("--sr_eval_steps", type=int, default=5, help="Number of ODE steps (N) used for SR sampling during validation.")
         parser.add_argument("--loss_type", type=str, default="mse", help="The type of loss function to use.")
         parser.add_argument("--loss_abs_exponent", type=float, default= 0.5,  help="magnitude transformation in the loss term")
+
+        # Optional GAN fine-tuning (perceptual / high-frequency detail). Disabled by default.
+        parser.add_argument("--gan_enabled", action="store_true", help="Enable GAN losses + discriminators (manual optimization).")
+        parser.add_argument("--gan_warmup_epochs", type=int, default=0, help="Epochs to train with only flow loss before enabling GAN losses.")
+        parser.add_argument("--gan_disc_lr", type=float, default=2e-4, help="Discriminator learning rate.")
+        parser.add_argument("--gan_disc_beta1", type=float, default=0.8, help="Discriminator Adam beta1.")
+        parser.add_argument("--gan_disc_beta2", type=float, default=0.99, help="Discriminator Adam beta2.")
+        parser.add_argument("--gan_lambda_adv", type=float, default=1.0, help="Weight for adversarial generator loss.")
+        parser.add_argument("--gan_lambda_fm", type=float, default=2.0, help="Weight for discriminator feature matching loss.")
+        parser.add_argument("--gan_lambda_mel", type=float, default=45.0, help="Weight for log-mel L1 loss.")
+        parser.add_argument("--gan_lambda_wav", type=float, default=0.0, help="Weight for waveform L1 loss (optional).")
+        parser.add_argument("--gan_mbd_fft_sizes", type=int, nargs="+", default=[2048, 1024, 512], help="FFT sizes for MultiBandDiscriminator (MBD).")
+        parser.add_argument("--gan_mel_n_mels", type=int, default=80, help="Number of mel bins for mel loss.")
+        parser.add_argument("--gan_mel_fmin", type=float, default=0.0, help="Mel fmin for mel loss.")
+        parser.add_argument("--gan_mel_fmax", type=float, default=-1.0, help="Mel fmax for mel loss (-1 => sr/2).")
+        parser.add_argument("--gan_use_mbd", action="store_true", help="Include MultiBandDiscriminator (MBD) in GAN losses.")
         return parser
 
     def __init__(
-        self, backbone, ode, lr=1e-4, ema_decay=0.999, t_eps=0.03, T_rev = 1.0,  loss_abs_exponent=0.5, 
-        num_eval_files=0, sr_eval_steps=5, loss_type='mse', data_module_cls=None, **kwargs
+        self,
+        backbone,
+        ode,
+        lr=1e-4,
+        ema_decay=0.999,
+        t_eps=0.03,
+        T_rev=1.0,
+        loss_abs_exponent=0.5,
+        num_eval_files=0,
+        sr_eval_steps=5,
+        loss_type='mse',
+        gan_enabled: bool = False,
+        gan_warmup_epochs: int = 0,
+        gan_disc_lr: float = 2e-4,
+        gan_disc_beta1: float = 0.8,
+        gan_disc_beta2: float = 0.99,
+        gan_lambda_adv: float = 1.0,
+        gan_lambda_fm: float = 2.0,
+        gan_lambda_mel: float = 45.0,
+        gan_lambda_wav: float = 0.0,
+        gan_mbd_fft_sizes=(2048, 1024, 512),
+        gan_mel_n_mels: int = 80,
+        gan_mel_fmin: float = 0.0,
+        gan_mel_fmax: float = -1.0,
+        gan_use_mbd: bool = False,
+        data_module_cls=None,
+        **kwargs,
     ):
         """
         Create a new ScoreModel.
@@ -88,7 +129,8 @@ class VFModel(pl.LightningModule):
         # Store hyperparams and save them
         self.lr = lr
         self.ema_decay = ema_decay
-        self.ema = ExponentialMovingAverage(self.parameters(), decay=self.ema_decay)
+        # Track EMA only for the generator (vector field model), not optional GAN discriminators.
+        self.ema = ExponentialMovingAverage(self.dnn.parameters(), decay=self.ema_decay)
         self._error_loading_ema = False
         self.t_eps = t_eps
         self.T_rev = T_rev
@@ -97,20 +139,96 @@ class VFModel(pl.LightningModule):
         self.num_eval_files = num_eval_files
         self.sr_eval_steps = sr_eval_steps
         self.loss_abs_exponent = loss_abs_exponent
+
+        # GAN (optional)
+        self.gan_enabled = bool(gan_enabled)
+        self.gan_warmup_epochs = int(gan_warmup_epochs)
+        self.gan_disc_lr = float(gan_disc_lr)
+        self.gan_disc_beta1 = float(gan_disc_beta1)
+        self.gan_disc_beta2 = float(gan_disc_beta2)
+        self.gan_lambda_adv = float(gan_lambda_adv)
+        self.gan_lambda_fm = float(gan_lambda_fm)
+        self.gan_lambda_mel = float(gan_lambda_mel)
+        self.gan_lambda_wav = float(gan_lambda_wav)
+        self.gan_mbd_fft_sizes = [int(x) for x in gan_mbd_fft_sizes]
+        self.gan_mel_n_mels = int(gan_mel_n_mels)
+        self.gan_mel_fmin = float(gan_mel_fmin)
+        self.gan_mel_fmax = float(gan_mel_fmax)
+        self.gan_use_mbd = bool(gan_use_mbd)
+
+        # PL2+: multiple optimizers require manual optimization; enable it only when GAN is on.
+        self.automatic_optimization = not self.gan_enabled
+
         # do not serialize class objects into hparams (breaks checkpoint portability)
         self.save_hyperparameters(ignore=['no_wandb', 'data_module_cls'])
         self.data_module = data_module_cls(**kwargs, gpu=kwargs.get('gpus', 0) > 0)
 
+        # Lazily import torchaudio + discriminators only when GAN mode is enabled, to keep baseline runnable.
+        if self.gan_enabled:
+            try:
+                from torchaudio.transforms import MelSpectrogram
+                from flowmse.gan.discriminators import MultiBandDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
+                from flowmse.gan.losses import discriminator_loss, feature_loss, generator_loss
+            except Exception as e:
+                raise ImportError(
+                    "GAN mode requires torchaudio. Please ensure torchaudio is installed and importable."
+                ) from e
+
+            self.mpd = MultiPeriodDiscriminator()
+            self.msd = MultiScaleDiscriminator()
+            self.mbd = MultiBandDiscriminator(fft_sizes=self.gan_mbd_fft_sizes)
+            self._gan_discriminator_loss = discriminator_loss
+            self._gan_generator_loss = generator_loss
+            self._gan_feature_loss = feature_loss
+
+            sr = int(getattr(self.data_module, "sampling_rate", 48000))
+            fmax = (sr / 2.0) if float(self.gan_mel_fmax) <= 0 else float(self.gan_mel_fmax)
+            n_fft = int(getattr(self.data_module, "n_fft", 2048))
+            hop = int(getattr(self.data_module, "hop_length", 512))
+            mel_kwargs = dict(
+                sample_rate=sr,
+                n_fft=n_fft,
+                hop_length=hop,
+                win_length=n_fft,
+                f_min=float(self.gan_mel_fmin),
+                f_max=float(fmax),
+                n_mels=int(self.gan_mel_n_mels),
+                power=1.0,
+                center=True,
+                pad_mode="reflect",
+                mel_scale="htk",
+            )
+            # torchaudio version compatibility: some versions may not support mel_scale kwarg.
+            try:
+                self.mel_fn = MelSpectrogram(**mel_kwargs)
+            except TypeError:
+                mel_kwargs.pop("mel_scale", None)
+                self.mel_fn = MelSpectrogram(**mel_kwargs)
+
 
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-        return optimizer
+        if not getattr(self, "gan_enabled", False):
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+            return optimizer
+
+        # GAN mode: two optimizers (manual optimization in training_step)
+        opt_g = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
+        disc_params = list(self.mpd.parameters()) + list(self.msd.parameters())
+        if bool(getattr(self, "gan_use_mbd", False)):
+            disc_params += list(self.mbd.parameters())
+        opt_d = torch.optim.Adam(
+            disc_params,
+            lr=float(self.gan_disc_lr),
+            betas=(float(self.gan_disc_beta1), float(self.gan_disc_beta2)),
+        )
+        return [opt_g, opt_d]
 
     def optimizer_step(self, *args, **kwargs):
         # Method overridden so that the EMA params are updated after each optimizer step
         super().optimizer_step(*args, **kwargs)
-        self.ema.update(self.parameters())
+        # Only track EMA for the generator (vector field network)
+        self.ema.update(self.dnn.parameters())
 
     # on_load_checkpoint / on_save_checkpoint needed for EMA storing/loading
     def on_load_checkpoint(self, checkpoint):
@@ -129,12 +247,12 @@ class VFModel(pl.LightningModule):
         if not self._error_loading_ema:
             if mode == False and not no_ema:
                 # eval
-                self.ema.store(self.parameters())        # store current params in EMA
-                self.ema.copy_to(self.parameters())      # copy EMA parameters over current params for evaluation
+                self.ema.store(self.dnn.parameters())        # store current params in EMA
+                self.ema.copy_to(self.dnn.parameters())      # copy EMA parameters over current params for evaluation
             else:
                 # train
                 if self.ema.collected_params is not None:
-                    self.ema.restore(self.parameters())  # restore the EMA weights (if stored)
+                    self.ema.restore(self.dnn.parameters())  # restore the EMA weights (if stored)
         return res
 
     def eval(self, no_ema=False):
@@ -181,12 +299,142 @@ class VFModel(pl.LightningModule):
         vectorfield = self(xt, t, y)
         loss = self._loss(vectorfield, condVF)
         return loss
+
+    def _flow_step_with_intermediates(self, batch):
+        """Same as `_step` but returns intermediates for optional GAN training."""
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            x0, y = batch[0], batch[1]
+        else:
+            raise ValueError("Unexpected batch format. Expected (x0, y) or (x0, y, sr_out).")
+
+        rdm = (1 - torch.rand(x0.shape[0], device=x0.device)) * (self.T_rev - self.t_eps) + self.t_eps
+        t = torch.clamp(rdm, max=float(self.T_rev))
+        mean, std = self.ode.marginal_prob(x0, t, y)
+        z = torch.randn_like(x0)
+        xt = mean + std[:, None, None, None] * z
+        der_std = self.ode.der_std(t)
+        der_mean = self.ode.der_mean(x0, t, y)
+        condVF = der_std * z + der_mean
+        vectorfield = self(xt, t, y)
+        loss = self._loss(vectorfield, condVF)
+        return loss, xt, t, y, vectorfield, std
+
+    def _x0_from_vectorfield(self, xt, t, y, vectorfield, std):
+        """
+        Closed-form x0 estimate for FLOWMATCHING based on:
+          xt = (1-t)x0 + t y + std(t) z
+          v = d(std)/dt * z + (y - x0)
+        => x0 = (a*xt + (1-a*t)*y - v) / (1 + a*(1-t)), where a = d(std)/dt / std(t)
+        """
+        eps = 1e-8
+        der_std = float(self.ode.der_std(t))
+        std = torch.clamp(std, min=eps)  # (B,)
+        a = (der_std / std)[:, None, None, None]
+        t4 = t[:, None, None, None]
+        denom = 1.0 + a * (1.0 - t4)
+        num = a * xt + (1.0 - a * t4) * y - vectorfield
+        return num / denom
     
 
     def training_step(self, batch, batch_idx):
-        loss = self._step(batch, batch_idx)
-        self.log('train_loss', loss, on_step=True, on_epoch=True)
-        return loss
+        # Default (no GAN): pure flow matching objective.
+        if not getattr(self, "gan_enabled", False):
+            loss = self._step(batch, batch_idx)
+            self.log('train_loss', loss, on_step=True, on_epoch=True)
+            return loss
+
+        # GAN mode: manual optimization (PL2+ compatible)
+        opt_g, opt_d = self.optimizers()
+        loss_flow, xt, t, y, vf, std = self._flow_step_with_intermediates(batch)
+        self.log("train_loss_flow", loss_flow, on_step=True, on_epoch=True)
+
+        gan_active = bool(self.current_epoch >= int(getattr(self, "gan_warmup_epochs", 0)))
+
+        # Warmup: only flow loss, update generator
+        if not gan_active:
+            opt_g.zero_grad(set_to_none=True)
+            self.manual_backward(loss_flow)
+            opt_g.step()
+            opt_g.zero_grad(set_to_none=True)
+            self.ema.update(self.dnn.parameters())
+            self.log("train_loss", loss_flow, on_step=True, on_epoch=True)
+            return loss_flow
+
+        # Generator output (x0 estimate) -> waveform
+        x0_hat = self._x0_from_vectorfield(xt, t, y, vf, std)
+        target_len = int((self.data_module.num_frames - 1) * self.data_module.hop_length)
+        x_wav = self.to_audio(batch[0], length=target_len).detach()
+        xhat_wav = self.to_audio(x0_hat, length=target_len)
+
+        # ----- Train discriminators -----
+        disc_loss = loss_flow.new_tensor(0.0)
+        y_df_r, y_df_g, _, _ = self.mpd(x_wav, xhat_wav.detach())
+        l_f, _, _ = self._gan_discriminator_loss(y_df_r, y_df_g)
+        disc_loss = disc_loss + l_f
+
+        y_ds_r, y_ds_g, _, _ = self.msd(x_wav, xhat_wav.detach())
+        l_s, _, _ = self._gan_discriminator_loss(y_ds_r, y_ds_g)
+        disc_loss = disc_loss + l_s
+
+        if bool(getattr(self, "gan_use_mbd", False)):
+            y_db_r, y_db_g, _, _ = self.mbd(x_wav, xhat_wav.detach())
+            l_b, _, _ = self._gan_discriminator_loss(y_db_r, y_db_g)
+            disc_loss = disc_loss + l_b
+
+        opt_d.zero_grad(set_to_none=True)
+        self.manual_backward(disc_loss)
+        opt_d.step()
+        opt_d.zero_grad(set_to_none=True)
+
+        # ----- Train generator -----
+        gen_adv = loss_flow.new_tensor(0.0)
+        gen_fm = loss_flow.new_tensor(0.0)
+
+        y_df_r, y_df_g, fmap_f_r, fmap_f_g = self.mpd(x_wav, xhat_wav)
+        l_gen_f, _ = self._gan_generator_loss(y_df_g)
+        gen_adv = gen_adv + l_gen_f
+        gen_fm = gen_fm + self._gan_feature_loss(fmap_f_r, fmap_f_g)
+
+        y_ds_r, y_ds_g, fmap_s_r, fmap_s_g = self.msd(x_wav, xhat_wav)
+        l_gen_s, _ = self._gan_generator_loss(y_ds_g)
+        gen_adv = gen_adv + l_gen_s
+        gen_fm = gen_fm + self._gan_feature_loss(fmap_s_r, fmap_s_g)
+
+        if bool(getattr(self, "gan_use_mbd", False)):
+            y_db_r, y_db_g, fmap_b_r, fmap_b_g = self.mbd(x_wav, xhat_wav)
+            l_gen_b, _ = self._gan_generator_loss(y_db_g)
+            gen_adv = gen_adv + l_gen_b
+            gen_fm = gen_fm + self._gan_feature_loss(fmap_b_r, fmap_b_g)
+
+        # log-mel loss (helps stabilize; set gan_mel_fmax=sr/2 to include HF)
+        mel_real = torch.log(torch.clamp(self.mel_fn(x_wav.squeeze(1)), min=1e-5))
+        mel_fake = torch.log(torch.clamp(self.mel_fn(xhat_wav.squeeze(1)), min=1e-5))
+        loss_mel = F.l1_loss(mel_fake, mel_real)
+
+        loss_wav = F.l1_loss(xhat_wav, x_wav) if float(self.gan_lambda_wav) > 0 else loss_flow.new_tensor(0.0)
+
+        loss_g = (
+            loss_flow
+            + float(self.gan_lambda_adv) * gen_adv
+            + float(self.gan_lambda_fm) * gen_fm
+            + float(self.gan_lambda_mel) * loss_mel
+            + float(self.gan_lambda_wav) * loss_wav
+        )
+
+        opt_g.zero_grad(set_to_none=True)
+        self.manual_backward(loss_g)
+        opt_g.step()
+        opt_g.zero_grad(set_to_none=True)
+        self.ema.update(self.dnn.parameters())
+
+        self.log("train_loss_gan_d", disc_loss, on_step=True, on_epoch=True)
+        self.log("train_loss_gan_adv", gen_adv, on_step=True, on_epoch=True)
+        self.log("train_loss_gan_fm", gen_fm, on_step=True, on_epoch=True)
+        self.log("train_loss_gan_mel", loss_mel, on_step=True, on_epoch=True)
+        if float(self.gan_lambda_wav) > 0:
+            self.log("train_loss_gan_wav", loss_wav, on_step=True, on_epoch=True)
+        self.log("train_loss", loss_g, on_step=True, on_epoch=True)
+        return loss_g
 
     def validation_step(self, batch, batch_idx):
         loss = self._step(batch, batch_idx)
