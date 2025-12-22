@@ -395,11 +395,16 @@ class VFModel(pl.LightningModule):
                         if sr_tag in saved_rates:
                             continue
                         saved_rates.add(sr_tag)
-                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_gt.wav"), x_wav[i], sr_hr)
-                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_lr.wav"), y_wav[i], sr_hr)
-                        sf.write(os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_sr.wav"), xhat_wav[i], sr_hr)
+                        gt_path = os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_gt.wav")
+                        lr_path = os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_lr.wav")
+                        sr_path = os.path.join(audio_save_dir, f"epoch{epoch:03d}_sr{sr_tag}_sr.wav")
+                        sf.write(gt_path, x_wav[i], sr_hr)
+                        sf.write(lr_path, y_wav[i], sr_hr)
+                        sf.write(sr_path, xhat_wav[i], sr_hr)
+                        print(f"[val_audio] 保存: {sr_path}")
                 except Exception as e:
-                    pass  # 静默失败，不影响训练
+                    print(f"[val_audio] 保存失败: {e}")
+                    warnings.warn(f"保存验证音频失败: {e}")
 
         return loss
 
