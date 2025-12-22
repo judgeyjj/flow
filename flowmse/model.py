@@ -381,6 +381,34 @@ class VFModel(pl.LightningModule):
                         self.log(f"val_si_sdr_cond_sr{int(rate)}", _nanmean([sisdr_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
                         self.log(f"val_si_sdr_gen_sr{int(rate)}", _nanmean([sisdr_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
 
+                # 保存验证音频样本 (每个 epoch 保存前 3 个)
+                try:
+                    import soundfile as sf
+                    import os
+                    audio_save_dir = os.path.join(self.trainer.log_dir or "logs", "val_audio")
+                    os.makedirs(audio_save_dir, exist_ok=True)
+                    epoch = self.current_epoch
+                    num_save = min(3, n)  # 最多保存 3 个样本
+                    for i in range(num_save):
+                        sr_tag = int(sr_out[i].item()) if sr_out is not None else 0
+                        # 保存 GT (高分辨率目标)
+                        sf.write(
+                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sample{i}_sr{sr_tag}_gt.wav"),
+                            x_wav[i], sr_hr
+                        )
+                        # 保存 LR/Cond (低分辨率条件输入)
+                        sf.write(
+                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sample{i}_sr{sr_tag}_lr.wav"),
+                            y_wav[i], sr_hr
+                        )
+                        # 保存 SR (模型生成的超分辨率结果)
+                        sf.write(
+                            os.path.join(audio_save_dir, f"epoch{epoch:03d}_sample{i}_sr{sr_tag}_sr.wav"),
+                            xhat_wav[i], sr_hr
+                        )
+                except Exception as e:
+                    warnings.warn(f"保存验证音频失败: {e}")
+
         return loss
 
     def forward(self, x, t, y):
