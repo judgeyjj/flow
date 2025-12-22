@@ -3,7 +3,7 @@ from argparse import ArgumentParser
 import json
 import os
 import pytorch_lightning as pl
-# from pytorch_lightning.plugins import DDPPlugin  # deprecated
+# from pytorch_lightning.plugins import DDPStrategy  # deprecated
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -211,7 +211,7 @@ if __name__ == '__main__':
      if num_gpus > 0:
           trainer_kwargs["accelerator"] = "gpu"
           if world_size > 1:
-               trainer_kwargs["strategy"] = DDPPlugin(find_unused_parameters=False)
+               trainer_kwargs["strategy"] = DDPStrategy(find_unused_parameters=False)
      else:
           trainer_kwargs["accelerator"] = "cpu"
      trainer = pl.Trainer.from_argparse_args(
