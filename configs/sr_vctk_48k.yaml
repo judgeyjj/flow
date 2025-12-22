@@ -31,7 +31,7 @@ DataModule:
   supported_sampling_rates: [8000, 16000, 24000, 32000]  # will be randomly chosen per sample (always resample)
 
   # Point these to your VCTK split folders; wav files can be nested in subfolders.
-  train_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/clean
+  train_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/eval
   valid_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/eval
   # test_dir: /abs/path/to/vctk/test
 
