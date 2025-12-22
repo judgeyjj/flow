@@ -3,8 +3,8 @@ from argparse import ArgumentParser
 import json
 import os
 import pytorch_lightning as pl
-from pytorch_lightning.plugins import DDPPlugin
-# from pytorch_lightning.strategies import DDPStrategy
+# from pytorch_lightning.plugins import DDPPlugin  # deprecated
+from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
