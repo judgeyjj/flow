@@ -327,7 +327,16 @@ class SpecsDataModule(pl.LightningDataModule):
 
     def istft(self, spec, length=None):
         window = self._get_window(spec)
-        return torch.istft(spec, **{**self.istft_kwargs, "window": window, "length": length})
+        # spec 可能是 [B, C, F, T] 或 [B, F, T]，torch.istft 需要 [B, F, T] 或 [F, T]
+        needs_unsqueeze = False
+        if spec.dim() == 4:
+            # [B, C, F, T] -> [B, F, T]，假设 C=1
+            needs_unsqueeze = True
+            spec = spec.squeeze(1)
+        out = torch.istft(spec, **{**self.istft_kwargs, "window": window, "length": length})
+        if needs_unsqueeze:
+            out = out.unsqueeze(1)  # [B, T] -> [B, 1, T]
+        return out
 
     def train_dataloader(self):
         return DataLoader(
