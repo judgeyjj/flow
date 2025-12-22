@@ -100,9 +100,17 @@ class SwanLabLogger(LightningLoggerBase):
             except Exception:
                 params_dict = {}
 
+        # 只保留数值类型的超参数，SwanLab 不支持字符串类型
+        numeric_params = {}
+        for k, v in params_dict.items():
+            if isinstance(v, (int, float, bool)):
+                numeric_params[k] = v
+            elif isinstance(v, (np.integer, np.floating)):
+                numeric_params[k] = float(v)
+        
         # If experiment has not been created yet, stash config for init()
         if self._experiment is None:
-            self._config.update(params_dict)
+            self._config.update(numeric_params)
             _ = self.experiment
             return
 

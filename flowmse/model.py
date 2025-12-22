@@ -285,7 +285,7 @@ class VFModel(pl.LightningModule):
                     for rate in bucket_rates:
                         mask = (sr_out == int(rate))
                         if bool(mask.any()):
-                            self.log(f"val_n_sr{int(rate)}", mask.sum(), on_step=False, on_epoch=True, sync_dist=True)
+                            self.log(f"val_n_sr{int(rate)}", float(mask.sum()), on_step=False, on_epoch=True, sync_dist=True)
                             self.log(f"val_lsd_cond_sr{int(rate)}", lsd_cond_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
                             self.log(f"val_lsd_gen_sr{int(rate)}", lsd_gen_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
                             self.log(f"val_sc_cond_sr{int(rate)}", sc_cond_b[mask].mean(), on_step=False, on_epoch=True, sync_dist=True)
