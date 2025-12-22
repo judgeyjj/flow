@@ -242,7 +242,8 @@ if __name__ == '__main__':
         trainer_kwargs["accelerator"] = "gpu"
         trainer_kwargs["devices"] = num_gpus
         if world_size > 1:
-            trainer_kwargs["strategy"] = DDPStrategy(find_unused_parameters=False)
+            # GAN 模式下需要 find_unused_parameters=True（生成器和判别器交替更新）
+            trainer_kwargs["strategy"] = DDPStrategy(find_unused_parameters=True)
     else:
         trainer_kwargs["accelerator"] = "cpu"
     
