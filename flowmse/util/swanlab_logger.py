@@ -4,7 +4,19 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
-from pytorch_lightning.loggers.base import LightningLoggerBase, rank_zero_experiment
+
+# 兼容 PyTorch Lightning 1.x 和 2.x
+try:
+    from pytorch_lightning.loggers.logger import Logger as LightningLoggerBase
+    from pytorch_lightning.loggers.logger import rank_zero_experiment
+except ImportError:
+    try:
+        from pytorch_lightning.loggers.base import LightningLoggerBase, rank_zero_experiment
+    except ImportError:
+        # PL 2.0+ 使用 Logger 基类
+        from lightning.pytorch.loggers.logger import Logger as LightningLoggerBase
+        from lightning.pytorch.loggers.logger import rank_zero_experiment
+
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 
@@ -28,9 +40,9 @@ def _sanitize_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
 
 class SwanLabLogger(LightningLoggerBase):
     """
-    Minimal SwanLab logger for PyTorch Lightning (PL 1.x).
+    SwanLab logger，兼容 PyTorch Lightning 1.x 和 2.x。
 
-    SwanLab API (based on docs examples):
+    SwanLab API:
       - swanlab.init(project=..., experiment_name=..., description=..., config=dict)
       - swanlab.log(dict, step=?)
     """
@@ -130,5 +142,3 @@ class SwanLabLogger(LightningLoggerBase):
                 except Exception:
                     pass
                 break
-
-
