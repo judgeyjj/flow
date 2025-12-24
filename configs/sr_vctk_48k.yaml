@@ -25,13 +25,31 @@ swanlab_experiment_name: sr_vctk_48k
 swanlab_description: "48k SR on VCTK (8/16/24/32k -> 48k)"
 
 VFModel:
-  # SR validation metrics (sampling-based)
-  num_eval_files: 50
-  sr_eval_steps: 5
+  # ============ Training Parameters ============
+  lr: 0.0001              # Learning rate
+  ema_decay: 0.999        # EMA decay constant
+  t_eps: 0.03             # Minimum diffusion time (t_delta in paper)
+  T_rev: 1.0              # Maximum diffusion time (t_N in paper)
+  loss_type: mse          # Loss type: 'mse' or 'mae'
+  loss_abs_exponent: 0.5  # Magnitude transformation exponent in loss
 
-  # Optional GAN fine-tuning (helps perceptual HF detail; recommend enabling only after a stable pretrain)
+  # ============ SR Validation Metrics ============
+  num_eval_files: 50      # Number of validation samples for SR metrics
+  sr_eval_steps: 5        # ODE steps for SR sampling during validation
+
+  # ============ Spectral Bias Fix (频谱偏差修复) ============
+  # 1. Frequency-weighted loss: emphasize high-frequency generation
+  freq_weighted_loss: true
+  lf_weight: 0.1    # Weight for low-frequency loss (below Nyquist cutoff)
+  hf_weight: 10.0   # Weight for high-frequency loss (above Nyquist cutoff)
+  
+  # 2. Bandwidth conditioning: inject cutoff frequency info into model (NU-Wave2 style)
+  bandwidth_conditioning: true
+
+  # ============ GAN Fine-tuning (optional) ============
+  # Helps perceptual HF detail; recommend enabling only after a stable pretrain
   gan_enabled: true
-  gan_warmup_epochs: 0  # 改这个值来设置 GAN 开始的 epoch
+  gan_warmup_epochs: 10  # 改这个值来设置 GAN 开始的 epoch
   gan_disc_lr: 0.0002
   gan_disc_beta1: 0.8
   gan_disc_beta2: 0.99
@@ -50,7 +68,7 @@ DataModule:
   supported_sampling_rates: [8000, 16000, 24000, 32000]  # will be randomly chosen per sample (always resample)
 
   # Point these to your VCTK split folders; wav files can be nested in subfolders.
-  train_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/eval
+  train_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/clean
   valid_dir: /data01/audio_group/m24_yuanjiajun/AP-BWE/VCTK-Corpus-0.92/wav_test/train/eval
   # test_dir: /abs/path/to/vctk/test
 
