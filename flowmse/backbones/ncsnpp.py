@@ -117,6 +117,20 @@ class NCSNpp(nn.Module):
             modules[-1].weight.data = default_initializer()(modules[-1].weight.shape)
             nn.init.zeros_(modules[-1].bias)
 
+        # Bandwidth conditioning embedding (NU-Wave2 style)
+        self.bandwidth_conditioning = bool(unused_kwargs.get('bandwidth_conditioning', False))
+        if self.bandwidth_conditioning:
+            # Use same embedding style as time embedding
+            self.cutoff_embed_proj = layerspp.GaussianFourierProjection(
+                embedding_size=nf, scale=fourier_scale
+            )
+            self.cutoff_embed_dense1 = nn.Linear(embed_dim, nf * 4)
+            self.cutoff_embed_dense1.weight.data = default_initializer()(self.cutoff_embed_dense1.weight.shape)
+            nn.init.zeros_(self.cutoff_embed_dense1.bias)
+            self.cutoff_embed_dense2 = nn.Linear(nf * 4, nf * 4)
+            self.cutoff_embed_dense2.weight.data = default_initializer()(self.cutoff_embed_dense2.weight.shape)
+            nn.init.zeros_(self.cutoff_embed_dense2.bias)
+
         AttnBlock = functools.partial(layerspp.AttnBlockpp,
             init_scale=init_scale, skip_rescale=skip_rescale)
 
@@ -244,7 +258,7 @@ class NCSNpp(nn.Module):
 
         self.all_modules = nn.ModuleList(modules)
 
-    def forward(self, x, time_cond):
+    def forward(self, x, time_cond, cutoff_ratio=None):
         # timestep/noise_level embedding; only for continuous training
         modules = self.all_modules
         m_idx = 0
@@ -275,6 +289,14 @@ class NCSNpp(nn.Module):
             m_idx += 1
         else:
             temb = None
+
+        # Bandwidth conditioning: add cutoff embedding to time embedding
+        if self.bandwidth_conditioning and cutoff_ratio is not None and temb is not None:
+            # cutoff_ratio is in [0, 1], use log scale like time embedding
+            cutoff_emb = self.cutoff_embed_proj(torch.log(cutoff_ratio.clamp(min=1e-5)))
+            cutoff_emb = self.cutoff_embed_dense1(cutoff_emb)
+            cutoff_emb = self.cutoff_embed_dense2(self.act(cutoff_emb))
+            temb = temb + cutoff_emb  # Additive fusion
 
         # Downsampling block
         input_pyramid = None
