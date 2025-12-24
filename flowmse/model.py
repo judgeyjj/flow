@@ -61,6 +61,15 @@ class VFModel(pl.LightningModule):
         parser.add_argument("--loss_type", type=str, default="mse", help="The type of loss function to use.")
         parser.add_argument("--loss_abs_exponent", type=float, default= 0.5,  help="magnitude transformation in the loss term")
 
+        # Frequency-weighted loss for addressing spectral bias
+        parser.add_argument("--freq_weighted_loss", action="store_true", help="Enable frequency-weighted loss to emphasize high-frequency generation.")
+        parser.add_argument("--lf_weight", type=float, default=0.1, help="Weight for low-frequency loss (below cutoff). Default: 0.1")
+        parser.add_argument("--hf_weight", type=float, default=10.0, help="Weight for high-frequency loss (above cutoff). Default: 10.0")
+
+        # Bandwidth conditioning (NU-Wave2 style) for spectral bias fix
+        parser.add_argument("--bandwidth_conditioning", action="store_true", help="Enable bandwidth conditioning: inject cutoff frequency into backbone.")
+
+
         # Optional GAN fine-tuning (perceptual / high-frequency detail). Disabled by default.
         parser.add_argument("--gan_enabled", action="store_true", help="Enable GAN losses + discriminators (manual optimization).")
         parser.add_argument("--gan_warmup_epochs", type=int, default=0, help="Epochs to train with only flow loss before enabling GAN losses.")
@@ -90,6 +99,10 @@ class VFModel(pl.LightningModule):
         num_eval_files=0,
         sr_eval_steps=5,
         loss_type='mse',
+        freq_weighted_loss: bool = False,
+        lf_weight: float = 0.1,
+        hf_weight: float = 10.0,
+        bandwidth_conditioning: bool = False,
         gan_enabled: bool = False,
         gan_warmup_epochs: int = 0,
         gan_disc_lr: float = 2e-4,
@@ -139,6 +152,14 @@ class VFModel(pl.LightningModule):
         self.num_eval_files = num_eval_files
         self.sr_eval_steps = sr_eval_steps
         self.loss_abs_exponent = loss_abs_exponent
+
+        # Frequency-weighted loss (spectral bias fix)
+        self.freq_weighted_loss = bool(freq_weighted_loss)
+        self.lf_weight = float(lf_weight)
+        self.hf_weight = float(hf_weight)
+
+        # Bandwidth conditioning (spectral bias fix - NU-Wave2 style)
+        self.bandwidth_conditioning = bool(bandwidth_conditioning)
 
         # GAN (optional)
         self.gan_enabled = bool(gan_enabled)
@@ -280,10 +301,60 @@ class VFModel(pl.LightningModule):
         loss = torch.mean(0.5*torch.sum(losses.reshape(losses.shape[0], -1), dim=-1))
         return loss
 
+    def _freq_weighted_loss(self, vectorfield, condVF, sr_out):
+        """
+        Frequency-weighted loss to address spectral bias.
+        
+        Applies different weights to low-frequency (LF) and high-frequency (HF) bins:
+        - LF (below cutoff): weight = self.lf_weight (default 0.1)
+        - HF (above cutoff): weight = self.hf_weight (default 10.0)
+        
+        This forces the model to focus on generating high-frequency content,
+        since low-frequency is already well-represented in the condition.
+        
+        Args:
+            vectorfield: Predicted vector field (B, C, F, T)
+            condVF: Target conditional vector field (B, C, F, T)
+            sr_out: Per-sample downsampled rate (B,) tensor
+        """
+        B, C, F, T = vectorfield.shape
+        
+        sr_target = int(getattr(self.data_module, "sampling_rate", 48000))
+        n_fft = int(getattr(self.data_module, "n_fft", 2048))
+        freq_per_bin = float(sr_target) / float(n_fft)  # Hz per frequency bin
+        
+        # Compute per-sample cutoff bins: cutoff = sr_out / 2 (Nyquist)
+        cutoff_bins = (sr_out.float() / 2.0 / freq_per_bin).long()  # (B,)
+        cutoff_bins = torch.clamp(cutoff_bins, min=1, max=F)
+        
+        # Create frequency weight mask: (B, 1, F, 1)
+        freq_idx = torch.arange(F, device=vectorfield.device)  # (F,)
+        # Broadcast: (B, F) where True = HF, False = LF
+        is_hf = freq_idx.unsqueeze(0) >= cutoff_bins.unsqueeze(1)  # (B, F)
+        
+        weights = torch.where(is_hf, self.hf_weight, self.lf_weight)  # (B, F)
+        weights = weights.unsqueeze(1).unsqueeze(-1)  # (B, 1, F, 1)
+        
+        # Compute weighted loss
+        if self.loss_type == 'mse':
+            err = vectorfield - condVF
+            losses = weights * torch.square(err.abs())
+        elif self.loss_type == 'mae':
+            err = vectorfield - condVF
+            losses = weights * err.abs()
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+        
+        # Normalize by average weight to keep loss scale comparable
+        avg_weight = weights.mean()
+        loss = torch.mean(0.5 * torch.sum(losses.reshape(B, -1), dim=-1)) / (avg_weight + 1e-8)
+        return loss
+
     def _step(self, batch, batch_idx):
         # batch may include sr_out for SR bucketed evaluation: (x0, y, sr_out)
         if isinstance(batch, (list, tuple)) and len(batch) >= 2:
             x0, y = batch[0], batch[1]
+            sr_out = batch[2] if len(batch) >= 3 else None
         else:
             raise ValueError("Unexpected batch format. Expected (x0, y) or (x0, y, sr_out).")
         rdm = (1-torch.rand(x0.shape[0], device=x0.device)) * (self.T_rev - self.t_eps) + self.t_eps
@@ -296,14 +367,27 @@ class VFModel(pl.LightningModule):
         der_std = self.ode.der_std(t)
         der_mean = self.ode.der_mean(x0,t,y)
         condVF = der_std * z + der_mean
-        vectorfield = self(xt, t, y)
-        loss = self._loss(vectorfield, condVF)
+        
+        # Compute cutoff_ratio for bandwidth conditioning
+        cutoff_ratio = None
+        if self.bandwidth_conditioning and sr_out is not None:
+            sr_target = float(getattr(self.data_module, "sampling_rate", 48000))
+            cutoff_ratio = sr_out.float() / sr_target  # (B,) normalized to [0, 1]
+        
+        vectorfield = self(xt, t, y, cutoff_ratio=cutoff_ratio)
+        
+        # Use frequency-weighted loss if enabled and sr_out is available
+        if self.freq_weighted_loss and sr_out is not None:
+            loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
+        else:
+            loss = self._loss(vectorfield, condVF)
         return loss
 
     def _flow_step_with_intermediates(self, batch):
         """Same as `_step` but returns intermediates for optional GAN training."""
         if isinstance(batch, (list, tuple)) and len(batch) >= 2:
             x0, y = batch[0], batch[1]
+            sr_out = batch[2] if len(batch) >= 3 else None
         else:
             raise ValueError("Unexpected batch format. Expected (x0, y) or (x0, y, sr_out).")
 
@@ -315,8 +399,20 @@ class VFModel(pl.LightningModule):
         der_std = self.ode.der_std(t)
         der_mean = self.ode.der_mean(x0, t, y)
         condVF = der_std * z + der_mean
-        vectorfield = self(xt, t, y)
-        loss = self._loss(vectorfield, condVF)
+        
+        # Compute cutoff_ratio for bandwidth conditioning
+        cutoff_ratio = None
+        if self.bandwidth_conditioning and sr_out is not None:
+            sr_target = float(getattr(self.data_module, "sampling_rate", 48000))
+            cutoff_ratio = sr_out.float() / sr_target
+        
+        vectorfield = self(xt, t, y, cutoff_ratio=cutoff_ratio)
+        
+        # Use frequency-weighted loss if enabled and sr_out is available
+        if self.freq_weighted_loss and sr_out is not None:
+            loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
+        else:
+            loss = self._loss(vectorfield, condVF)
         return loss, xt, t, y, vectorfield, std
 
     def _x0_from_vectorfield(self, xt, t, y, vectorfield, std):
@@ -334,7 +430,61 @@ class VFModel(pl.LightningModule):
         denom = 1.0 + a * (1.0 - t4)
         num = a * xt + (1.0 - a * t4) * y - vectorfield
         return num / denom
-    
+
+    def replace_low_freq(self, x_hat, y, sr_out, sr_target=None, blend_bins=0):
+        """
+        Replace low-frequency part of generated spectrogram with input condition.
+        
+        This addresses the "low-frequency copying" issue: since LF is already known
+        from the condition, we only need the model to generate HF content.
+        
+        Args:
+            x_hat: Generated spectrogram (B, C, F, T) - in transformed domain
+            y: Input condition spectrogram (B, C, F, T) - in transformed domain
+            sr_out: Per-sample downsampled rate (B,) tensor or int
+            sr_target: Target sampling rate (default: self.data_module.sampling_rate)
+            blend_bins: Number of bins for crossover blending (0 = hard cutoff)
+        
+        Returns:
+            Spectrogram with LF from y and HF from x_hat
+        """
+        if sr_target is None:
+            sr_target = int(getattr(self.data_module, "sampling_rate", 48000))
+        
+        n_fft = int(getattr(self.data_module, "n_fft", 2048))
+        freq_per_bin = float(sr_target) / float(n_fft)  # Hz per bin
+        
+        B, C, F, T = x_hat.shape
+        out = x_hat.clone()
+        
+        # Handle both tensor and scalar sr_out
+        if isinstance(sr_out, (int, float)):
+            sr_out = torch.full((B,), sr_out, device=x_hat.device)
+        
+        for i in range(B):
+            # Cutoff frequency = sr_out / 2 (Nyquist of the downsampled signal)
+            cutoff_hz = float(sr_out[i].item()) / 2.0
+            cutoff_bin = int(cutoff_hz / freq_per_bin)
+            cutoff_bin = min(cutoff_bin, F)  # Clamp to valid range
+            
+            if blend_bins > 0 and cutoff_bin > blend_bins:
+                # Smooth crossover: blend LF->HF transition
+                blend_start = cutoff_bin - blend_bins
+                blend_end = cutoff_bin + blend_bins
+                blend_end = min(blend_end, F)
+                
+                # Hard copy below blend region
+                out[i, :, :blend_start, :] = y[i, :, :blend_start, :]
+                
+                # Linear blend in crossover region
+                for b in range(blend_start, blend_end):
+                    alpha = float(b - blend_start) / float(blend_end - blend_start)
+                    out[i, :, b, :] = (1 - alpha) * y[i, :, b, :] + alpha * x_hat[i, :, b, :]
+            else:
+                # Hard cutoff (original behavior)
+                out[i, :, :cutoff_bin, :] = y[i, :, :cutoff_bin, :]
+        
+        return out
 
     def training_step(self, batch, batch_idx):
         # Default (no GAN): pure flow matching objective.
@@ -473,6 +623,10 @@ class VFModel(pl.LightningModule):
                 )
                 xhat_p, _ = sampler()
                 xhat = xhat_p[..., :T]
+
+                # Low-frequency replacement: use condition LF, only evaluate model's HF generation
+                if sr_out is not None:
+                    xhat = self.replace_low_freq(xhat, y, sr_out, blend_bins=0)
 
                 # Convert to original STFT domain for metrics
                 X = self._backward_transform(x0)
@@ -657,12 +811,26 @@ class VFModel(pl.LightningModule):
 
         return loss
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, cutoff_ratio=None):
+        """
+        Forward pass through the vector field model.
+        
+        Args:
+            x: Noisy spectrogram at time t (B, C, F, T)
+            t: Diffusion timestep (B,)
+            y: Condition spectrogram (B, C, F, T)
+            cutoff_ratio: Optional bandwidth cutoff ratio = sr_out / sr_target (B,)
+                          Only used when bandwidth_conditioning is enabled.
+        """
         # Concatenate y as an extra channel
         dnn_input = torch.cat([x, y], dim=1)
         
-        # the minus is most likely unimportant here - taken from Song's repo
-        score = -self.dnn(dnn_input, t)
+        # Pass cutoff_ratio to backbone if bandwidth conditioning is enabled
+        if self.bandwidth_conditioning and cutoff_ratio is not None:
+            score = -self.dnn(dnn_input, t, cutoff_ratio=cutoff_ratio)
+        else:
+            # the minus is most likely unimportant here - taken from Song's repo
+            score = -self.dnn(dnn_input, t)
         return score
 
     def to(self, *args, **kwargs):

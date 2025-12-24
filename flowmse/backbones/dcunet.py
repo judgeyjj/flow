@@ -241,6 +241,22 @@ class DCUNet(nn.Module):
                 ]
         self.embed = nn.Sequential(*embed_ops)
 
+        # Bandwidth conditioning embedding (NU-Wave2 style)
+        # Uses same GFP style as time embedding, combines via addition
+        self.bandwidth_conditioning = bool(kwargs.get('bandwidth_conditioning', False))
+        if self.bandwidth_conditioning and self.time_embedding is not None:
+            cutoff_embed_ops = [
+                GaussianFourierProjection(embed_dim=embed_dim, complex_valued=self.time_embedding_complex)
+            ]
+            for _ in range(self.temb_layers_global):
+                cutoff_embed_ops += [
+                    ComplexLinear(embed_dim, embed_dim, complex_valued=True),
+                    OnReIm(get_activation(dcunet_temb_activation))
+                ]
+            self.cutoff_embed = nn.Sequential(*cutoff_embed_ops)
+        else:
+            self.cutoff_embed = None
+
         ### Instantiate DCUNet layers ###
         output_layer = ComplexConvTranspose2d(*decoders[-1])
         encoders = [DCUNetComplexEncoderBlock(*args, **encoder_decoder_kwargs) for args in encoders]
@@ -258,7 +274,7 @@ class DCUNet(nn.Module):
         self.decoders = nn.ModuleList(decoders)
         self.output_layer = output_layer or nn.Identity()
 
-    def forward(self, spec, t) -> Tensor:
+    def forward(self, spec, t, cutoff_ratio=None) -> Tensor:
         """
         Input shape is expected to be $(batch, nfreqs, time)$, with $nfreqs - 1$ divisible
         by $f_0 * f_1 * ... * f_N$ where $f_k$ are the frequency strides of the encoders,
@@ -266,6 +282,8 @@ class DCUNet(nn.Module):
         strides of the encoders.
         Args:
             spec (Tensor): complex spectrogram tensor. 1D, 2D or 3D tensor, time last.
+            t (Tensor): diffusion timestep (B,)
+            cutoff_ratio (Tensor, optional): bandwidth cutoff ratio = sr_out / sr_target (B,)
         Returns:
             Tensor, of shape (batch, time) or (time).
         """
@@ -273,7 +291,14 @@ class DCUNet(nn.Module):
         # Estimate mask from time-frequency representation.
         x_in = self.fix_input_dims(spec)
         x = x_in
+        
+        # Compute time embedding
         t_embed = self.embed(t+0j) if self.time_embedding is not None else None
+        
+        # Combine with cutoff embedding if bandwidth conditioning is enabled
+        if self.cutoff_embed is not None and cutoff_ratio is not None:
+            cutoff_embed = self.cutoff_embed(cutoff_ratio+0j)
+            t_embed = t_embed + cutoff_embed  # Additive fusion
 
         enc_outs = []
         for idx, enc in enumerate(self.encoders):
