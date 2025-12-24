@@ -309,13 +309,8 @@ class VFModel(pl.LightningModule):
         - LF (below cutoff): weight = self.lf_weight (default 0.1)
         - HF (above cutoff): weight = self.hf_weight (default 10.0)
         
-        This forces the model to focus on generating high-frequency content,
-        since low-frequency is already well-represented in the condition.
-        
-        Args:
-            vectorfield: Predicted vector field (B, C, F, T)
-            condVF: Target conditional vector field (B, C, F, T)
-            sr_out: Per-sample downsampled rate (B,) tensor
+        Returns:
+            tuple: (total_loss, lf_loss_raw, hf_loss_raw) for logging
         """
         B, C, F, T = vectorfield.shape
         
@@ -331,24 +326,33 @@ class VFModel(pl.LightningModule):
         freq_idx = torch.arange(F, device=vectorfield.device)  # (F,)
         # Broadcast: (B, F) where True = HF, False = LF
         is_hf = freq_idx.unsqueeze(0) >= cutoff_bins.unsqueeze(1)  # (B, F)
+        is_lf = ~is_hf
         
         weights = torch.where(is_hf, self.hf_weight, self.lf_weight)  # (B, F)
         weights = weights.unsqueeze(1).unsqueeze(-1)  # (B, 1, F, 1)
         
-        # Compute weighted loss
+        # Compute error
+        err = vectorfield - condVF
         if self.loss_type == 'mse':
-            err = vectorfield - condVF
-            losses = weights * torch.square(err.abs())
+            raw_losses = torch.square(err.abs())
         elif self.loss_type == 'mae':
-            err = vectorfield - condVF
-            losses = weights * err.abs()
+            raw_losses = err.abs()
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
-        # Normalize by average weight to keep loss scale comparable
+        # Weighted total loss
+        weighted_losses = weights * raw_losses
         avg_weight = weights.mean()
-        loss = torch.mean(0.5 * torch.sum(losses.reshape(B, -1), dim=-1)) / (avg_weight + 1e-8)
-        return loss
+        total_loss = torch.mean(0.5 * torch.sum(weighted_losses.reshape(B, -1), dim=-1)) / (avg_weight + 1e-8)
+        
+        # Compute separate LF/HF losses for logging (unweighted, for monitoring)
+        is_lf_mask = is_lf.unsqueeze(1).unsqueeze(-1).float()  # (B, 1, F, 1)
+        is_hf_mask = is_hf.unsqueeze(1).unsqueeze(-1).float()
+        
+        lf_loss = (raw_losses * is_lf_mask).sum() / (is_lf_mask.sum() + 1e-8)
+        hf_loss = (raw_losses * is_hf_mask).sum() / (is_hf_mask.sum() + 1e-8)
+        
+        return total_loss, lf_loss, hf_loss
 
     def _step(self, batch, batch_idx):
         # batch may include sr_out for SR bucketed evaluation: (x0, y, sr_out)
@@ -378,10 +382,11 @@ class VFModel(pl.LightningModule):
         
         # Use frequency-weighted loss if enabled and sr_out is available
         if self.freq_weighted_loss and sr_out is not None:
-            loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
+            loss, lf_loss, hf_loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
+            return loss, lf_loss, hf_loss
         else:
             loss = self._loss(vectorfield, condVF)
-        return loss
+            return loss, None, None
 
     def _flow_step_with_intermediates(self, batch):
         """Same as `_step` but returns intermediates for optional GAN training."""
@@ -410,10 +415,11 @@ class VFModel(pl.LightningModule):
         
         # Use frequency-weighted loss if enabled and sr_out is available
         if self.freq_weighted_loss and sr_out is not None:
-            loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
+            loss, lf_loss, hf_loss = self._freq_weighted_loss(vectorfield, condVF, sr_out)
         else:
             loss = self._loss(vectorfield, condVF)
-        return loss, xt, t, y, vectorfield, std
+            lf_loss, hf_loss = None, None
+        return loss, lf_loss, hf_loss, xt, t, y, vectorfield, std
 
     def _x0_from_vectorfield(self, xt, t, y, vectorfield, std):
         """
@@ -489,14 +495,20 @@ class VFModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # Default (no GAN): pure flow matching objective.
         if not getattr(self, "gan_enabled", False):
-            loss = self._step(batch, batch_idx)
+            loss, lf_loss, hf_loss = self._step(batch, batch_idx)
             self.log('train_loss', loss, on_step=True, on_epoch=True)
+            if lf_loss is not None:
+                self.log('train_loss_lf', lf_loss, on_step=True, on_epoch=True)
+                self.log('train_loss_hf', hf_loss, on_step=True, on_epoch=True)
             return loss
 
         # GAN mode: manual optimization (PL2+ compatible)
         opt_g, opt_d = self.optimizers()
-        loss_flow, xt, t, y, vf, std = self._flow_step_with_intermediates(batch)
+        loss_flow, lf_loss, hf_loss, xt, t, y, vf, std = self._flow_step_with_intermediates(batch)
         self.log("train_loss_flow", loss_flow, on_step=True, on_epoch=True)
+        if lf_loss is not None:
+            self.log('train_loss_lf', lf_loss, on_step=True, on_epoch=True)
+            self.log('train_loss_hf', hf_loss, on_step=True, on_epoch=True)
 
         gan_active = bool(self.current_epoch >= int(getattr(self, "gan_warmup_epochs", 0)))
 
@@ -587,7 +599,7 @@ class VFModel(pl.LightningModule):
         return loss_g
 
     def validation_step(self, batch, batch_idx):
-        loss = self._step(batch, batch_idx)
+        loss, _, _ = self._step(batch, batch_idx)
         self.log('valid_loss', loss, on_step=False, on_epoch=True)
 
         # SR validation metrics (requires sampling; computed on a small subset)
@@ -679,21 +691,8 @@ class VFModel(pl.LightningModule):
                 self.log("val_sc_gen", sc_gen, on_step=False, on_epoch=True)
                 self.log("val_lsd_gain", lsd_cond - lsd_gen, on_step=False, on_epoch=True)
 
-                # Bucketed logging by dynamic sr_out (only for the sampled subset)
-                if sr_out is not None:
-                    try:
-                        bucket_rates = list(getattr(self.data_module, "supported_sampling_rates", []))
-                    except Exception:
-                        bucket_rates = []
-                    for rate in bucket_rates:
-                        mask = (sr_out == int(rate))
-                        if bool(mask.any()):
-                            self.log(f"val_n_sr{int(rate)}", float(mask.sum()), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_cond_sr{int(rate)}", lsd_cond_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_gen_sr{int(rate)}", lsd_gen_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_sc_cond_sr{int(rate)}", sc_cond_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_sc_gen_sr{int(rate)}", sc_gen_b[mask].mean(), on_step=False, on_epoch=True)
-                            self.log(f"val_lsd_gain_sr{int(rate)}", (lsd_cond_b[mask].mean() - lsd_gen_b[mask].mean()), on_step=False, on_epoch=True)
+                # Core metrics logged (bucketed metrics disabled for cleaner logs)
+                # To enable per-SR metrics, uncomment the bucketed logging below
 
                 # Time-domain metrics (not part of loss): PESQ/ESTOI are computed on 16kHz downsampled audio.
                 target_len = int((self.data_module.num_frames - 1) * self.data_module.hop_length)
@@ -766,23 +765,7 @@ class VFModel(pl.LightningModule):
                 self.log("val_si_sdr_gen", sisdr_gen, on_step=False, on_epoch=True)
                 self.log("val_si_sdr_gain", sisdr_gen - sisdr_cond, on_step=False, on_epoch=True)
 
-                # Bucketed time-domain metrics (same subset)
-                if sr_out is not None:
-                    try:
-                        bucket_rates = list(getattr(self.data_module, "supported_sampling_rates", []))
-                    except Exception:
-                        bucket_rates = []
-                    sr_np = sr_out.detach().cpu().numpy().astype(int)
-                    for rate in bucket_rates:
-                        idx = np.where(sr_np == int(rate))[0]
-                        if idx.size == 0:
-                            continue
-                        self.log(f"val_pesq_cond_16k_sr{int(rate)}", _nanmean([pesq_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_pesq_gen_16k_sr{int(rate)}", _nanmean([pesq_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_estoi_cond_16k_sr{int(rate)}", _nanmean([estoi_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_estoi_gen_16k_sr{int(rate)}", _nanmean([estoi_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_si_sdr_cond_sr{int(rate)}", _nanmean([sisdr_cond_list[i] for i in idx]), on_step=False, on_epoch=True)
-                        self.log(f"val_si_sdr_gen_sr{int(rate)}", _nanmean([sisdr_gen_list[i] for i in idx]), on_step=False, on_epoch=True)
+                # Bucketed time-domain metrics disabled for cleaner logs
 
                 # 保存验证音频样本 (每个采样率各保存一个)
                 try:
