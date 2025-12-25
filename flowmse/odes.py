@@ -124,5 +124,5 @@ class FLOWMATCHING(ODE):
         
     def der_std(self, t):
         """Constant noise: derivative is 0"""
-        return torch.zeros_like(t)
+        return 0.0
     
