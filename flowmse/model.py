@@ -458,7 +458,7 @@ class VFModel(pl.LightningModule):
         mean, std = self.ode.marginal_prob(x0, t, y)
         z = torch.randn_like(x0)
         xt = mean + std[:, None, None, None] * z
-        der_std = self.ode.der_std(t)
+        der_std = self.ode.der_std(t)[:, None, None, None]  # Expand (B,) -> (B,1,1,1)
         der_mean = self.ode.der_mean(x0, t, y)
         condVF = der_std * z + der_mean
         
