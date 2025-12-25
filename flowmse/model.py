@@ -340,25 +340,22 @@ class VFModel(pl.LightningModule):
         return self.train(False, no_ema=no_ema)
 
     def _mse_loss(self, x, x_hat):    
-        err = x-x_hat
+        err = x - x_hat
         losses = torch.square(err.abs())
-
-        # taken from reduce_op function: sum over channels and position and mean over batch dim
-        # presumably only important for absolute loss number, not for gradients
-        loss = torch.mean(0.5*torch.sum(losses.reshape(losses.shape[0], -1), dim=-1))
+        # Use mean over all elements (C, F, T) for proper MSE normalization
+        loss = 0.5 * torch.mean(losses)
         return loss
     
     
     def _loss(self, vectorfield, condVF):    
         if self.loss_type == 'mse':
-            err = vectorfield-condVF
+            err = vectorfield - condVF
             losses = torch.square(err.abs())
         elif self.loss_type == 'mae':
-            err = vectorfield-condVF
+            err = vectorfield - condVF
             losses = err.abs()
-        # taken from reduce_op function: sum over channels and position and mean over batch dim
-        # presumably only important for absolute loss number, not for gradients
-        loss = torch.mean(0.5*torch.sum(losses.reshape(losses.shape[0], -1), dim=-1))
+        # Use mean over all elements for proper loss normalization
+        loss = 0.5 * torch.mean(losses)
         return loss
 
     def _freq_weighted_loss(self, vectorfield, condVF, sr_out):
@@ -400,11 +397,7 @@ class VFModel(pl.LightningModule):
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
-        # Weighted total loss
-        # Use weighted loss directly - weights already emphasize HF
-        # Normalize by total bins, not avg_weight (which causes instability)
-        weighted_losses = weights * raw_losses
-        total_loss = torch.mean(0.5 * torch.sum(weighted_losses.reshape(B, -1), dim=-1))
+        # Weighted total loss - use mean for proper normalization\n        weighted_losses = weights * raw_losses\n        total_loss = 0.5 * torch.mean(weighted_losses)
         
         # Compute separate LF/HF losses for logging (unweighted, for monitoring)
         is_lf_mask = is_lf.unsqueeze(1).unsqueeze(-1).float()  # (B, 1, F, 1)

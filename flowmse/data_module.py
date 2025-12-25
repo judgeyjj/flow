@@ -148,9 +148,12 @@ class Specs(Dataset):
         x_down = _scipy_resample_torch(x, down_len)
         y = _scipy_resample_torch(x_down, x.size(-1))
 
-        # Normalize
+        # Normalize - use max of both x and y to prevent amplification trap
+        # When y (low-pass filtered) has low energy, using only y.max() would
+        # amplify x excessively, causing loss explosion for high-frequency sounds
         if self.normalize == "cond":
-            normfac = y.abs().max()
+            # Use the larger of x or y max to ensure stable normalization
+            normfac = torch.max(x.abs().max(), y.abs().max())
         elif self.normalize == "target":
             normfac = x.abs().max()
         else:
