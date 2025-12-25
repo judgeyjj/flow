@@ -480,19 +480,17 @@ class VFModel(pl.LightningModule):
 
     def _x0_from_vectorfield(self, xt, t, y, vectorfield, std):
         """
-        Closed-form x0 estimate for FLOWMATCHING based on:
-          xt = (1-t)x0 + t y + std(t) z
-          v = d(std)/dt * z + (y - x0)
-        => x0 = (a*xt + (1-a*t)*y - v) / (1 + a*(1-t)), where a = d(std)/dt / std(t)
+        Estimate x0 from vectorfield for Independent CFM.
+        
+        In Independent CFM:
+          - Path: x_t = (1-t)*y + t*x0 + sigma_min*noise
+          - Vector field: v = x0 - y (the HR-LR increment)
+          
+        Therefore: x0 = y + v (simply add vectorfield to condition!)
+        
+        This is much simpler than the old OU-based formula.
         """
-        eps = 1e-8
-        der_std = float(self.ode.der_std(t))
-        std = torch.clamp(std, min=eps)  # (B,)
-        a = (der_std / std)[:, None, None, None]
-        t4 = t[:, None, None, None]
-        denom = 1.0 + a * (1.0 - t4)
-        num = a * xt + (1.0 - a * t4) * y - vectorfield
-        return num / denom
+        return y + vectorfield
 
     def replace_low_freq(self, x_hat, y, sr_out, sr_target=None, blend_bins=0):
         """
