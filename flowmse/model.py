@@ -397,7 +397,9 @@ class VFModel(pl.LightningModule):
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
-        # Weighted total loss - use mean for proper normalization\n        weighted_losses = weights * raw_losses\n        total_loss = 0.5 * torch.mean(weighted_losses)
+        # Weighted total loss - use mean for proper normalization
+        weighted_losses = weights * raw_losses
+        total_loss = 0.5 * torch.mean(weighted_losses)
         
         # Compute separate LF/HF losses for logging (unweighted, for monitoring)
         is_lf_mask = is_lf.unsqueeze(1).unsqueeze(-1).float()  # (B, 1, F, 1)
