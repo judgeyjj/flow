@@ -43,23 +43,26 @@ def get_white_box_solver(
             cutoff_ratio = float(sr_out) / float(sr_target)
 
     def ode_solver(Y_prior=Y_prior):
-        """The PC sampler function."""
+        """The PC sampler function for Independent CFM."""
         with torch.no_grad():
             
             if Y_prior == None:
                 Y_prior = Y
             
+            # Start from t=0: x_t = y + noise (prior is at t=0)
             xt, _ = ode.prior_sampling(Y_prior.shape, Y_prior)
-            if odesolver_name=="euler":
-                timesteps = torch.linspace(T_rev, t_eps, N, device=Y.device)
+            
+            if odesolver_name == "euler":
+                # Independent CFM: integrate from t_eps (near 0) to T_rev (near 1)
+                timesteps = torch.linspace(t_eps, T_rev, N, device=Y.device)
                 
             xt = xt.to(Y_prior.device)
             for i in range(len(timesteps)):
                 t = timesteps[i]
                 if i != len(timesteps) - 1:
-                    stepsize = t - timesteps[i+1]
+                    stepsize = timesteps[i+1] - t  # Positive stepsize (forward)
                 else:
-                    stepsize = timesteps[-1]
+                    stepsize = T_rev - t  # Final step
                     
                 vec_t = torch.ones(Y.shape[0], device=Y.device) * t
                 

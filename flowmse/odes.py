@@ -58,53 +58,71 @@ class ODE(abc.ABC):
 
 @ODERegistry.register("flowmatching")
 class FLOWMATCHING(ODE):
-    #original flow matching
-    #Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matt Le. Flow matching for generative modeling. International Conference on Learning Representations (ICLR), 2023.
-    #mu_t = (1-t)x+ty, sigma_t = (1-t)sigma_min +t
-    #t범위 0<t<=1
+    """
+    Independent CFM for Audio Super-Resolution (adapted from FLowHigh).
+    
+    Key changes from standard flow matching:
+    - Path: t=0 starts at y (LR), t=1 ends at x (HR)
+    - Vector field: directly predicts x0 - y (HR increment)
+    - Noise: constant sigma_min (optional small noise for regularization)
+    
+    Original flow matching: mu_t = (1-t)*x + t*y
+    Independent CFM: mu_t = (1-t)*y + t*x  (reversed!)
+    """
     @staticmethod
     def add_argparse_args(parser):        
-        parser.add_argument("--sigma_min", type=float, default=0.00, help="The minimum sigma to use. 0.05 by default.")
-        parser.add_argument("--sigma_max",type=float, default=0.487 , help="The maximum sigma to use. 1 by default") 
+        parser.add_argument("--sigma_min", type=float, default=1e-4, help="Constant noise level (small for regularization)")
+        parser.add_argument("--sigma_max", type=float, default=1e-4, help="Not used in Independent CFM, kept for compatibility")
         return parser
 
-    def __init__(self, sigma_min=0.00, sigma_max =0.487, **ignored_kwargs):
-        
+    def __init__(self, sigma_min=1e-4, sigma_max=1e-4, **ignored_kwargs):
         super().__init__()        
         self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        
+        self.sigma_max = sigma_max  # Not used, kept for compatibility
         
     def copy(self):
-        return FLOWMATCHING(self.sigma_min,self.sigma_max  )
+        return FLOWMATCHING(self.sigma_min, self.sigma_max)
 
-    def ode(self,x,t,*args):
-        pass    
-    def _mean(self, x0, t, y):       
-        return (1-t)[:,None,None,None]*x0 + t[:,None,None,None]*y
+    def ode(self, x, t, *args):
+        pass
+    
+    def _mean(self, x0, t, y):
+        """
+        Independent CFM interpolation: from y (LR) to x0 (HR)
+        t=0: mean = y (low resolution input)
+        t=1: mean = x0 (high resolution target)
+        """
+        t_expanded = t[:, None, None, None]
+        return (1 - t_expanded) * y + t_expanded * x0
 
     def _std(self, t):
-
-        return (1-t)*self.sigma_min + t*self.sigma_max
+        """Constant noise (FLowHigh's independent_cfm_constant style)"""
+        return torch.ones_like(t) * self.sigma_min
 
     def marginal_prob(self, x0, t, y):
         return self._mean(x0, t, y), self._std(t)
 
     def prior_sampling(self, shape, y):
+        """
+        Prior is at t=0, which is y + small noise.
+        This is the sampling starting point.
+        """
         if shape != y.shape:
             warnings.warn(f"Target shape {shape} does not match shape of y {y.shape}! Ignoring target shape.")
-        std = self._std(torch.ones((y.shape[0],), device=y.device)) #inference시 사이즈 맞추기 위함
+        std = self.sigma_min
         z = torch.randn_like(y)
-        
-        x_T = y + z * std[:, None, None, None]
-        return x_T, z
+        # Start from y (LR) + small noise
+        x_0 = y + z * std
+        return x_0, z
 
-    def der_mean(self,x0,t,y):
-        return y-x0
+    def der_mean(self, x0, t, y):
+        """
+        Vector field target: d(mean)/dt = x0 - y (HR - LR)
+        This is the increment the model needs to predict!
+        """
+        return x0 - y
         
-    def der_std(self,t):
-        
-        return self.sigma_max-self.sigma_min
-    
-    
+    def der_std(self, t):
+        """Constant noise: derivative is 0"""
+        return torch.zeros_like(t)
     

@@ -40,7 +40,8 @@ class EulerODEsolver(ODEsolver):
         super().__init__(ode, VF_fn)
 
     def update_fn(self, x, t, y, stepsize, cutoff_ratio=None, *args):
-        dt = -stepsize
+        # Forward integration: dt is positive
+        dt = stepsize
         # Pass cutoff_ratio to vector field function for bandwidth conditioning
         if cutoff_ratio is not None:
             vectorfield = self.VF_fn(x, t, y, cutoff_ratio=cutoff_ratio)
