@@ -425,7 +425,7 @@ class VFModel(pl.LightningModule):
         z = torch.randn_like(x0)  #
         sigmas = std[:, None, None, None]
         xt = mean + sigmas * z
-        der_std = self.ode.der_std(t)
+        der_std = self.ode.der_std(t)[:, None, None, None]  # Expand (B,) -> (B,1,1,1)
         der_mean = self.ode.der_mean(x0,t,y)
         condVF = der_std * z + der_mean
         

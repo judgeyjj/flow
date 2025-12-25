@@ -123,6 +123,6 @@ class FLOWMATCHING(ODE):
         return x0 - y
         
     def der_std(self, t):
-        """Constant noise: derivative is 0"""
-        return 0.0
+        """Constant noise: derivative is 0. Returns (B,) tensor."""
+        return torch.zeros_like(t)
     
