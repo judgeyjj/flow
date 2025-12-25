@@ -46,6 +46,19 @@ VFModel:
   # 2. Bandwidth conditioning: inject cutoff frequency info into model (NU-Wave2 style)
   bandwidth_conditioning: true
 
+  # ============ Optimizer Settings ============
+  # Options: adam, adamw (default), muon (requires: pip install git+https://github.com/KellerJordan/Muon)
+  optimizer: adamw
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  weight_decay: 0.01
+  # Muon-specific (only used when optimizer=muon):
+  muon_lr: 0.02          # Muon uses higher LR for matrix params
+  muon_momentum: 0.95    # Muon momentum
+  # Note: LR scheduler (ReduceLROnPlateau) is auto-enabled:
+  #   patience=5 epochs, factor=0.5, min_lr=1e-6
+
+
   # ============ GAN Fine-tuning (optional) ============
   # Helps perceptual HF detail; recommend enabling only after a stable pretrain
   gan_enabled: true

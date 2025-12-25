@@ -69,6 +69,13 @@ class VFModel(pl.LightningModule):
         # Bandwidth conditioning (NU-Wave2 style) for spectral bias fix
         parser.add_argument("--bandwidth_conditioning", action="store_true", help="Enable bandwidth conditioning: inject cutoff frequency into backbone.")
 
+        # Optimizer settings (adam/adamw/muon)
+        parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw", "muon"], help="Optimizer: adam, adamw (default), or muon")
+        parser.add_argument("--adam_beta1", type=float, default=0.9, help="Adam/AdamW beta1")
+        parser.add_argument("--adam_beta2", type=float, default=0.999, help="Adam/AdamW beta2")
+        parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for AdamW/Muon")
+        parser.add_argument("--muon_lr", type=float, default=0.02, help="Muon learning rate for matrix params (default: 0.02)")
+        parser.add_argument("--muon_momentum", type=float, default=0.95, help="Muon momentum (default: 0.95)")
 
         # Optional GAN fine-tuning (perceptual / high-frequency detail). Disabled by default.
         parser.add_argument("--gan_enabled", action="store_true", help="Enable GAN losses + discriminators (manual optimization).")
@@ -103,6 +110,12 @@ class VFModel(pl.LightningModule):
         lf_weight: float = 0.1,
         hf_weight: float = 10.0,
         bandwidth_conditioning: bool = False,
+        optimizer: str = "adamw",
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        weight_decay: float = 0.01,
+        muon_lr: float = 0.02,
+        muon_momentum: float = 0.95,
         gan_enabled: bool = False,
         gan_warmup_epochs: int = 0,
         gan_disc_lr: float = 2e-4,
@@ -160,6 +173,14 @@ class VFModel(pl.LightningModule):
 
         # Bandwidth conditioning (spectral bias fix - NU-Wave2 style)
         self.bandwidth_conditioning = bool(bandwidth_conditioning)
+
+        # Optimizer settings
+        self.optimizer_type = optimizer
+        self.adam_beta1 = float(adam_beta1)
+        self.adam_beta2 = float(adam_beta2)
+        self.weight_decay = float(weight_decay)
+        self.muon_lr = float(muon_lr)
+        self.muon_momentum = float(muon_momentum)
 
         # GAN (optional)
         self.gan_enabled = bool(gan_enabled)
@@ -229,19 +250,58 @@ class VFModel(pl.LightningModule):
 
 
     def configure_optimizers(self):
+        # Create optimizer based on optimizer_type setting
+        opt_type = getattr(self, 'optimizer_type', 'adamw').lower()
+        betas = (self.adam_beta1, self.adam_beta2)
+        weight_decay = getattr(self, 'weight_decay', 0.01)
+        
+        if opt_type == 'adam':
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, betas=betas)
+        elif opt_type == 'adamw':
+            optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, betas=betas, weight_decay=weight_decay)
+        elif opt_type == 'muon':
+            # MuON optimizer with MuonWithAuxAdam: matrix params use Muon, others use AdamW
+            # Requires: pip install git+https://github.com/KellerJordan/Muon
+            try:
+                from muon import MuonWithAuxAdam
+                # Separate matrix params (for Muon) vs others (for AdamW)
+                matrix_params = [p for p in self.dnn.parameters() if p.ndim >= 2]
+                other_params = [p for p in self.dnn.parameters() if p.ndim < 2]
+                
+                muon_lr = getattr(self, 'muon_lr', 0.02)  # Muon default is higher
+                muon_momentum = getattr(self, 'muon_momentum', 0.95)
+                
+                param_groups = [
+                    dict(params=matrix_params, use_muon=True, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay),
+                    dict(params=other_params, use_muon=False, lr=self.lr, betas=betas, weight_decay=weight_decay),
+                ]
+                optimizer = MuonWithAuxAdam(param_groups)
+            except ImportError:
+                warnings.warn("MuON not available. Install with: pip install git+https://github.com/KellerJordan/Muon. Falling back to AdamW.")
+                optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, betas=betas, weight_decay=weight_decay)
+        else:
+            raise ValueError(f"Unknown optimizer: {opt_type}")
+        
         if not getattr(self, "gan_enabled", False):
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-            return optimizer
+            # Add LR scheduler (ReduceLROnPlateau like SSR)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "monitor": "valid_loss"}
+            }
 
         # GAN mode: two optimizers (manual optimization in training_step)
-        opt_g = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
+        opt_g = optimizer  # Use the configured optimizer for generator
         disc_params = list(self.mpd.parameters()) + list(self.msd.parameters())
         if bool(getattr(self, "gan_use_mbd", False)):
             disc_params += list(self.mbd.parameters())
-        opt_d = torch.optim.Adam(
+        opt_d = torch.optim.AdamW(
             disc_params,
             lr=float(self.gan_disc_lr),
             betas=(float(self.gan_disc_beta1), float(self.gan_disc_beta2)),
+            weight_decay=weight_decay,
         )
         return [opt_g, opt_d]
 
@@ -341,9 +401,10 @@ class VFModel(pl.LightningModule):
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
         # Weighted total loss
+        # Use weighted loss directly - weights already emphasize HF
+        # Normalize by total bins, not avg_weight (which causes instability)
         weighted_losses = weights * raw_losses
-        avg_weight = weights.mean()
-        total_loss = torch.mean(0.5 * torch.sum(weighted_losses.reshape(B, -1), dim=-1)) / (avg_weight + 1e-8)
+        total_loss = torch.mean(0.5 * torch.sum(weighted_losses.reshape(B, -1), dim=-1))
         
         # Compute separate LF/HF losses for logging (unweighted, for monitoring)
         is_lf_mask = is_lf.unsqueeze(1).unsqueeze(-1).float()  # (B, 1, F, 1)
