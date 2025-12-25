@@ -402,11 +402,12 @@ class VFModel(pl.LightningModule):
         total_loss = 0.5 * torch.mean(weighted_losses)
         
         # Compute separate LF/HF losses for logging (unweighted, for monitoring)
-        is_lf_mask = is_lf.unsqueeze(1).unsqueeze(-1).float()  # (B, 1, F, 1)
-        is_hf_mask = is_hf.unsqueeze(1).unsqueeze(-1).float()
+        # Expand mask to full shape (B, C, F, T) for proper masked mean
+        B, C, F, T = raw_losses.shape
+        is_lf_full = is_lf.unsqueeze(1).unsqueeze(-1).expand(B, C, F, T)  # (B, C, F, T)
         
-        lf_loss = (raw_losses * is_lf_mask).sum() / (is_lf_mask.sum() + 1e-8)
-        hf_loss = (raw_losses * is_hf_mask).sum() / (is_hf_mask.sum() + 1e-8)
+        lf_loss = raw_losses[is_lf_full].mean() if is_lf_full.any() else torch.tensor(0.0, device=raw_losses.device)
+        hf_loss = raw_losses[~is_lf_full].mean() if (~is_lf_full).any() else torch.tensor(0.0, device=raw_losses.device)
         
         return total_loss, lf_loss, hf_loss
 
