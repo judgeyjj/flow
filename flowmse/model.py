@@ -681,6 +681,9 @@ class VFModel(pl.LightningModule):
                 T = y.size(3)
                 y_p = pad_spec(y)
 
+                # Get sampling rate info for bandwidth conditioning
+                sr_target = int(getattr(self.data_module, "sampling_rate", 48000))
+                
                 sampler = sampling.get_white_box_solver(
                     "euler",
                     self.ode,
@@ -689,6 +692,8 @@ class VFModel(pl.LightningModule):
                     T_rev=self.T_rev,
                     t_eps=self.t_eps,
                     N=int(self.sr_eval_steps),
+                    sr_out=sr_out,
+                    sr_target=sr_target,
                 )
                 xhat_p, _ = sampler()
                 xhat = xhat_p[..., :T]
@@ -742,11 +747,8 @@ class VFModel(pl.LightningModule):
                 sc_cond = sc_cond_b.mean()
                 sc_gen = sc_gen_b.mean()
 
-                self.log("val_lsd_cond", lsd_cond, on_step=False, on_epoch=True)
+                # Only log core metrics for cleaner SwanLab
                 self.log("val_lsd_gen", lsd_gen, on_step=False, on_epoch=True)
-                self.log("val_sc_cond", sc_cond, on_step=False, on_epoch=True)
-                self.log("val_sc_gen", sc_gen, on_step=False, on_epoch=True)
-                self.log("val_lsd_gain", lsd_cond - lsd_gen, on_step=False, on_epoch=True)
 
                 # Core metrics logged (bucketed metrics disabled for cleaner logs)
                 # To enable per-SR metrics, uncomment the bucketed logging below
@@ -812,15 +814,10 @@ class VFModel(pl.LightningModule):
                 sisdr_cond = _nanmean(sisdr_cond_list)
                 sisdr_gen = _nanmean(sisdr_gen_list)
 
-                self.log("val_pesq_cond_16k", pesq_cond, on_step=False, on_epoch=True)
+                # Only log core metrics for cleaner SwanLab
                 self.log("val_pesq_gen_16k", pesq_gen, on_step=False, on_epoch=True)
-                self.log("val_pesq_gain_16k", pesq_gen - pesq_cond, on_step=False, on_epoch=True)
-                self.log("val_estoi_cond_16k", estoi_cond, on_step=False, on_epoch=True)
                 self.log("val_estoi_gen_16k", estoi_gen, on_step=False, on_epoch=True)
-                self.log("val_estoi_gain_16k", estoi_gen - estoi_cond, on_step=False, on_epoch=True)
-                self.log("val_si_sdr_cond", sisdr_cond, on_step=False, on_epoch=True)
                 self.log("val_si_sdr_gen", sisdr_gen, on_step=False, on_epoch=True)
-                self.log("val_si_sdr_gain", sisdr_gen - sisdr_cond, on_step=False, on_epoch=True)
 
                 # Bucketed time-domain metrics disabled for cleaner logs
 

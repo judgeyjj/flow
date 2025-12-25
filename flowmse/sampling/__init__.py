@@ -26,12 +26,21 @@ def from_flattened_numpy(x, shape):
 
 def get_white_box_solver(
     odesolver_name,  ode, VF_fn, Y, Y_prior=None,
-    T_rev=1.0, t_eps=0.03, N=30,  **kwargs
+    T_rev=1.0, t_eps=0.03, N=30, sr_out=None, sr_target=48000, **kwargs
 ):
    
     odesolver_cls = ODEsolverRegistry.get_by_name(odesolver_name)
     
     odesolver = odesolver_cls(ode, VF_fn)
+    
+    # Compute cutoff_ratio for bandwidth conditioning
+    cutoff_ratio = None
+    if sr_out is not None and sr_target is not None:
+        # sr_out could be a tensor or scalar
+        if isinstance(sr_out, torch.Tensor):
+            cutoff_ratio = sr_out.float() / float(sr_target)
+        else:
+            cutoff_ratio = float(sr_out) / float(sr_target)
 
     def ode_solver(Y_prior=Y_prior):
         """The PC sampler function."""
@@ -54,7 +63,7 @@ def get_white_box_solver(
                     
                 vec_t = torch.ones(Y.shape[0], device=Y.device) * t
                 
-                xt = odesolver.update_fn(xt, vec_t, Y, stepsize)
+                xt = odesolver.update_fn(xt, vec_t, Y, stepsize, cutoff_ratio=cutoff_ratio)
             x_result = xt
             ns = len(timesteps)
             return x_result, ns
