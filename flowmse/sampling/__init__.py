@@ -54,21 +54,22 @@ def get_white_box_solver(
             
             if odesolver_name == "euler":
                 # Independent CFM: integrate from t_eps (near 0) to T_rev (near 1)
-                timesteps = torch.linspace(t_eps, T_rev, N, device=Y.device)
+                # NOTE: `N` is intended to mean "number of Euler steps".
+                # torch.linspace(..., N) returns N points and would result in only (N-1) non-zero updates
+                # because the last dt becomes 0 when the endpoint is included.
+                # Use N+1 points so we get exactly N updates with positive dt.
+                timesteps = torch.linspace(t_eps, T_rev, N + 1, device=Y.device)
                 
             xt = xt.to(Y_prior.device)
-            for i in range(len(timesteps)):
+            # Perform exactly N Euler updates
+            for i in range(int(N)):
                 t = timesteps[i]
-                if i != len(timesteps) - 1:
-                    stepsize = timesteps[i+1] - t  # Positive stepsize (forward)
-                else:
-                    stepsize = T_rev - t  # Final step
-                    
+                stepsize = timesteps[i + 1] - t  # Positive stepsize (forward)
                 vec_t = torch.ones(Y.shape[0], device=Y.device) * t
                 
                 xt = odesolver.update_fn(xt, vec_t, Y, stepsize, cutoff_ratio=cutoff_ratio)
             x_result = xt
-            ns = len(timesteps)
+            ns = int(N)
             return x_result, ns
     
     return ode_solver
